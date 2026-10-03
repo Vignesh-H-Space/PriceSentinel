@@ -1,9 +1,9 @@
 USE map_project;
 
-CREATE TABLE price_list (
+CREATE TABLE promotion (
     SKU VARCHAR(100) NOT NULL,
     PL VARCHAR(100),
-    MAP DECIMAL(12,2),
-    LPP DECIMAL(12,2),
+    Season VARCHAR(100),
+    Promotion VARCHAR(255),
     FOREIGN KEY (SKU) REFERENCES sku(SKU)
 );

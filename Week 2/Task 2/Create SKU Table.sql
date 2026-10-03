@@ -1,3 +1,5 @@
+USE map_project;
+
 CREATE TABLE sku (
     SKU VARCHAR(100) NOT NULL,
     PN VARCHAR(100),
