@@ -1,0 +1,3 @@
+USE map_project;
+SELECT COUNT(*) FROM pl;
+SELECT * FROM pl LIMIT 10;
