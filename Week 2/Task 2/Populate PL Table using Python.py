@@ -1,3 +1,6 @@
+# Install the following Package
+# pip install mysql-connector-python
+
 import json
 import mysql.connector
 
@@ -6,7 +9,7 @@ import mysql.connector
 db_config = {
     'host': 'localhost',
     'user': 'root',
-    'password': 'YOUR_ROOT_PASSWORD',
+    'password': 'root',
     'database': 'map_project'
 }
 
