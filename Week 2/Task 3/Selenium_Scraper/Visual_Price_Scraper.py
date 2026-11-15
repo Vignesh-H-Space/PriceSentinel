@@ -1,3 +1,5 @@
+# Install the following Packages
+# pip install selenium webdriver-manager
 
 import os
 import csv
