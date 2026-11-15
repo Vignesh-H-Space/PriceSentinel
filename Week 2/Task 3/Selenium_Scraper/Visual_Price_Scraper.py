@@ -178,21 +178,27 @@ def scrape_flipkart_visual(driver, query, sku, category, top_n=3):
             time.sleep(0.02)
         search_box.send_keys(Keys.RETURN)
 
-        print(f"    [Flipkart] Waiting for search results...")
-        time.sleep(4)
+        # Wait for either product cards or price symbols to appear
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: len(d.find_elements(By.XPATH, "//*[contains(text(), '₹')]")) > 0
+            )
+        except Exception:
+            pass
 
-        # Scroll down slightly so product cards render
-        driver.execute_script("window.scrollBy(0, 300);")
-        time.sleep(1)
+        # Scroll down so product cards render their images and text
+        driver.execute_script("window.scrollBy(0, 400);")
+        time.sleep(2)
 
         driver.save_screenshot(screenshot_path)
         print(f"    [Flipkart] Screenshot captured: {screenshot_name}")
 
-        # Multiple card layout selectors (Flipkart uses list layout for Laptops, grid for Toners/Printers)
-        cards = driver.find_elements(By.CSS_SELECTOR, "div.tUxRFH") or \
-                driver.find_elements(By.CSS_SELECTOR, "div._75nlfW") or \
-                driver.find_elements(By.CSS_SELECTOR, "div.slAVV4") or \
-                driver.find_elements(By.CSS_SELECTOR, "div[data-id]")
+        # Ultra-resilient: Find cards containing price symbol
+        cards = driver.find_elements(By.XPATH, "//div[@data-id and .//*[contains(text(), '₹')]]")
+        if not cards:
+            cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/') and .//*[contains(text(), '₹')]]")
+        if not cards:
+            cards = driver.find_elements(By.CSS_SELECTOR, "div.tUxRFH, div._75nlfW, div.slAVV4, div.cPHDOP")
 
         for card in cards:
             if len(results) >= top_n:
@@ -202,31 +208,44 @@ def scrape_flipkart_visual(driver, query, sku, category, top_n=3):
             price = None
             link = None
 
-            # 1. Title (checks both list and grid title classes)
-            t_elems = card.find_elements(By.CSS_SELECTOR, "div.KzDlHZ") or \
-                      card.find_elements(By.CSS_SELECTOR, "div._4rR01T") or \
-                      card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or \
-                      card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or \
-                      card.find_elements(By.CSS_SELECTOR, "a.WKTcLC")
-            if t_elems:
-                title = t_elems[0].text.strip()
-
-            # 2. Price
-            p_elems = card.find_elements(By.CSS_SELECTOR, "div.Nx9bqj") or \
-                      card.find_elements(By.CSS_SELECTOR, "div._30jeq3")
+            # 1. Price: Find any text containing '₹' inside the card
+            p_elems = card.find_elements(By.XPATH, ".//*[contains(text(), '₹')]")
             if p_elems:
-                p_text = p_elems[0].text.replace("₹", "").replace(",", "").strip()
-                try:
-                    price = float(p_text)
-                except ValueError:
-                    price = None
+                for pe in p_elems:
+                    raw_txt = (pe.get_attribute("textContent") or pe.text).strip()
+                    # Look for pattern like ₹53,990 or ₹1,250
+                    if "₹" in raw_txt:
+                        clean_num = raw_txt.split("₹")[-1].split()[0].replace(",", "").strip()
+                        try:
+                            val = float(clean_num)
+                            if val > 50:  # avoid discount tags like '₹50 off'
+                                price = val
+                                break
+                        except ValueError:
+                            continue
+
+            # 2. Title: Look for title divs, anchors, or image alt tags
+            t_elems = card.find_elements(By.XPATH, ".//div[contains(@class, 'KzDlHZ') or contains(@class, '_4rR01T')]") or \
+                      card.find_elements(By.XPATH, ".//a[contains(@class, 'wjcEIp') or contains(@class, 's1Q9rs') or contains(@class, 'WKTcLC')]") or \
+                      card.find_elements(By.XPATH, ".//a[contains(@href, '/p/')]")
+            if t_elems:
+                for te in t_elems:
+                    t_text = (te.get_attribute("textContent") or te.text).strip()
+                    if len(t_text) > 10 and "₹" not in t_text:
+                        title = t_text
+                        break
+
+            # If title is still missing, check image alt attribute
+            if not title:
+                img_elems = card.find_elements(By.XPATH, ".//img[@alt]")
+                if img_elems:
+                    alt = img_elems[0].get_attribute("alt")
+                    if alt and len(alt) > 5:
+                        title = alt.strip()
 
             # 3. Link
-            l_elems = card.find_elements(By.CSS_SELECTOR, "a.CGtC58") or \
-                      card.find_elements(By.CSS_SELECTOR, "a._1fQZEK") or \
-                      card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or \
-                      card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or \
-                      card.find_elements(By.TAG_NAME, "a")
+            l_elems = card.find_elements(By.XPATH, ".//a[contains(@href, '/p/')]") or \
+                      card.find_elements(By.XPATH, ".//a[@href]")
             if l_elems:
                 raw_link = l_elems[0].get_attribute("href")
                 if raw_link:
