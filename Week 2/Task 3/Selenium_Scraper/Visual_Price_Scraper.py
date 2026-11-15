@@ -1,6 +1,3 @@
-# Install the following Packages
-# pip install selenium webdriver-manager
-
 import os
 import csv
 import time
@@ -26,11 +23,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 2. READ THE DYNAMIC INPUT FILE
 # ==============================================================================
 def load_input_products(filepath):
-    """
-    Reads the scraping_input.csv file.
-    Each row has: category, sku, query, platforms (semicolon-separated)
-    Returns a list of dictionaries.
-    """
     products = []
     with open(filepath, mode="r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -43,22 +35,17 @@ def load_input_products(filepath):
 # 3. INITIALIZE SELENIUM CHROME BROWSER (VISIBLE)
 # ==============================================================================
 def create_browser():
-    """
-    Opens a real, visible Chrome browser window.
-    webdriver_manager automatically downloads the correct ChromeDriver.
-    """
     chrome_options = Options()
-    # Keep browser visible (no headless mode) so user can watch
     chrome_options.add_argument("--start-maximized")
     chrome_options.add_argument("--disable-notifications")
-    # Reduce bot detection
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    # Stealth tweak: remove the "Chrome is being controlled by automated software" bar
+    # Stealth tweak
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -66,222 +53,210 @@ def create_browser():
     return driver
 
 # ==============================================================================
-# 4. AMAZON SCRAPER (VISUAL WITH SCREENSHOTS)
+# 4. AMAZON SCRAPER (FILTER ADS + SCROLL TO REAL PRODUCTS)
 # ==============================================================================
 def scrape_amazon_visual(driver, query, sku, category, top_n=3):
-    """
-    1. Opens amazon.in
-    2. Types query into search bar (visible keystrokes)
-    3. Presses Enter
-    4. Waits for results to load
-    5. Takes a screenshot
-    6. Extracts top_n product listings
-    """
-    print(f"    [Amazon] Opening amazon.in...")
+    print(f"    [Amazon] Navigating to amazon.in...")
     driver.get("https://www.amazon.in")
     time.sleep(2)
 
     results = []
     collected_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    screenshot_name = f"{category.replace(' / ', '_').replace(' ', '_')}_{sku}_amazon.png"
+    safe_cat = category.replace(" / ", "_").replace(" ", "_")
+    screenshot_name = f"{safe_cat}_{sku}_amazon.png"
     screenshot_path = os.path.join(OUTPUT_DIR, screenshot_name)
 
     try:
-        # Find the search box and type the query
-        print(f"    [Amazon] Searching: {query}...")
         search_box = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "twotabsearchtextbox"))
         )
         search_box.clear()
-        # Type character by character for visible effect
         for char in query:
             search_box.send_keys(char)
-            time.sleep(0.03)
-        time.sleep(0.5)
+            time.sleep(0.02)
         search_box.send_keys(Keys.RETURN)
 
-        # Wait for search results to load
-        print(f"    [Amazon] Waiting for results...")
-        WebDriverWait(driver, 15).until(
+        print(f"    [Amazon] Waiting for search results...")
+        WebDriverWait(driver, 12).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-component-type='s-search-result']"))
         )
+
+        # Scroll down slightly to skip top video/banner ad and bring actual products into view
+        driver.execute_script("window.scrollBy(0, 500);")
         time.sleep(2)
 
-        # Take screenshot of the search results page
+        # Save screenshot showing the actual product listings
         driver.save_screenshot(screenshot_path)
-        print(f"    [Amazon] Screenshot saved: {screenshot_name}")
+        print(f"    [Amazon] Screenshot captured: {screenshot_name}")
 
-        # Extract top_n product cards
-        cards = driver.find_elements(By.CSS_SELECTOR, "div[data-component-type='s-search-result']")
+        # Find product result cards
+        all_cards = driver.find_elements(By.CSS_SELECTOR, "div[data-component-type='s-search-result']")
 
-        for card in cards[:top_n]:
-            try:
-                # Title
-                title_elem = card.find_element(By.CSS_SELECTOR, "h2 a span")
-                title = title_elem.text.strip() if title_elem else "N/A"
+        for card in all_cards:
+            if len(results) >= top_n:
+                break
 
-                # Link
-                link_elem = card.find_element(By.CSS_SELECTOR, "h2 a")
-                link = link_elem.get_attribute("href") if link_elem else "N/A"
+            title = None
+            price = None
+            link = None
 
-                # Price
+            # 1. Title
+            title_elems = card.find_elements(By.CSS_SELECTOR, "h2 a span") or \
+                          card.find_elements(By.CSS_SELECTOR, "h2 span")
+            if title_elems:
+                title = title_elems[0].text.strip()
+
+            # 2. Link
+            link_elems = card.find_elements(By.CSS_SELECTOR, "h2 a")
+            if link_elems:
+                link = link_elems[0].get_attribute("href")
+
+            # 3. Price
+            price_elems = card.find_elements(By.CSS_SELECTOR, ".a-price .a-offscreen") or \
+                          card.find_elements(By.CSS_SELECTOR, ".a-price-whole")
+            if price_elems:
+                raw_price = price_elems[0].get_attribute("textContent") or price_elems[0].text
+                raw_price = raw_price.replace("₹", "").replace(",", "").replace(".", "").strip()
                 try:
-                    price_elem = card.find_element(By.CSS_SELECTOR, ".a-price-whole")
-                    price_str = price_elem.text.strip().replace(",", "").replace(".", "")
-                    price = float(price_str)
-                except Exception:
+                    price = float(raw_price)
+                except ValueError:
                     price = None
 
-                if title and price:
-                    results.append({
-                        "Seller_name": "Amazon Seller",
-                        "SKU": sku,
-                        "Category": category,
-                        "Region": "IN",
-                        "Advertised_price": price,
-                        "Marketplace": "Amazon",
-                        "Screenshot": screenshot_name,
-                        "Live_link": link,
-                        "Last_time_collected": collected_at,
-                        "Product_Title": title
-                    })
-            except Exception:
-                continue
+            # Filter out irrelevant accessories (price > 100)
+            if title and price and price > 100:
+                results.append({
+                    "Seller_name": "Amazon Seller",
+                    "SKU": sku,
+                    "Category": category,
+                    "Region": "IN",
+                    "Advertised_price": price,
+                    "Marketplace": "Amazon",
+                    "Screenshot": screenshot_name,
+                    "Live_link": link or "https://www.amazon.in",
+                    "Last_time_collected": collected_at,
+                    "Product_Title": title
+                })
 
     except Exception as e:
-        print(f"    [Amazon Error] {e}")
+        print(f"    [Amazon Warning/Error]: {e}")
         driver.save_screenshot(screenshot_path)
 
-    print(f"    [Amazon] Extracted {len(results)} listings.")
+    print(f"    [Amazon] Successfully extracted {len(results)} valid product listings.")
     return results
 
 # ==============================================================================
-# 5. FLIPKART SCRAPER (VISUAL WITH SCREENSHOTS)
+# 5. FLIPKART SCRAPER (MODERN SELECTORS + POPUP HANDLING)
 # ==============================================================================
 def scrape_flipkart_visual(driver, query, sku, category, top_n=3):
-    """
-    1. Opens flipkart.com
-    2. Closes login popup if it appears
-    3. Types query into search bar (visible keystrokes)
-    4. Presses Enter
-    5. Waits for results to load
-    6. Takes a screenshot
-    7. Extracts top_n product listings
-    """
-    print(f"    [Flipkart] Opening flipkart.com...")
+    print(f"    [Flipkart] Navigating to flipkart.com...")
     driver.get("https://www.flipkart.com")
     time.sleep(2)
 
     results = []
     collected_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    screenshot_name = f"{category.replace(' / ', '_').replace(' ', '_')}_{sku}_flipkart.png"
+    safe_cat = category.replace(" / ", "_").replace(" ", "_")
+    screenshot_name = f"{safe_cat}_{sku}_flipkart.png"
     screenshot_path = os.path.join(OUTPUT_DIR, screenshot_name)
 
     try:
-        # Flipkart often shows a login popup — close it
+        # Dismiss login popup if present
         try:
-            close_btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button._2KpZ6l._2doB4z"))
-            )
-            close_btn.click()
-            print(f"    [Flipkart] Closed login popup.")
-            time.sleep(1)
+            close_btn = driver.find_elements(By.CSS_SELECTOR, "span._30XB9F, button._2KpZ6l._2doB4z")
+            if close_btn:
+                close_btn[0].click()
+                time.sleep(1)
         except Exception:
-            pass  # No popup appeared, continue
+            pass
 
-        # Find search box and type the query
-        print(f"    [Flipkart] Searching: {query}...")
+        # Search bar
         search_box = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[title='Search for Products, Brands and More']"))
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='q'], input[title*='Search']"))
         )
         search_box.clear()
         for char in query:
             search_box.send_keys(char)
-            time.sleep(0.03)
-        time.sleep(0.5)
+            time.sleep(0.02)
         search_box.send_keys(Keys.RETURN)
 
-        # Wait for results
-        print(f"    [Flipkart] Waiting for results...")
+        print(f"    [Flipkart] Waiting for search results...")
         time.sleep(4)
 
-        # Take screenshot
+        # Scroll down slightly so product cards render
+        driver.execute_script("window.scrollBy(0, 300);")
+        time.sleep(1)
+
         driver.save_screenshot(screenshot_path)
-        print(f"    [Flipkart] Screenshot saved: {screenshot_name}")
+        print(f"    [Flipkart] Screenshot captured: {screenshot_name}")
 
-        # Extract product cards (Flipkart changes its CSS classes frequently)
-        # Try multiple known selectors
-        cards = driver.find_elements(By.CSS_SELECTOR, "div._1AtVbE div._13oc-S")
-        if not cards:
-            cards = driver.find_elements(By.CSS_SELECTOR, "div.cPHDOP")
-        if not cards:
-            cards = driver.find_elements(By.CSS_SELECTOR, "div._75nlfW")
-        if not cards:
-            cards = driver.find_elements(By.CSS_SELECTOR, "div.slAVV4")
+        # Multiple card layout selectors (Flipkart uses list layout for Laptops, grid for Toners/Printers)
+        cards = driver.find_elements(By.CSS_SELECTOR, "div.tUxRFH") or \
+                driver.find_elements(By.CSS_SELECTOR, "div._75nlfW") or \
+                driver.find_elements(By.CSS_SELECTOR, "div.slAVV4") or \
+                driver.find_elements(By.CSS_SELECTOR, "div[data-id]")
 
-        for card in cards[:top_n]:
-            try:
-                # Title
-                title_elem = (
-                    card.find_elements(By.CSS_SELECTOR, "div._4rR01T") or
-                    card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or
-                    card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or
-                    card.find_elements(By.CSS_SELECTOR, "a.WKTcLC")
-                )
-                title = title_elem[0].text.strip() if title_elem else "N/A"
+        for card in cards:
+            if len(results) >= top_n:
+                break
 
-                # Price
-                price_elem = (
-                    card.find_elements(By.CSS_SELECTOR, "div._30jeq3") or
-                    card.find_elements(By.CSS_SELECTOR, "div.Nx9bqj")
-                )
-                if price_elem:
-                    price_str = price_elem[0].text.strip().replace("₹", "").replace(",", "")
-                    price = float(price_str)
-                else:
+            title = None
+            price = None
+            link = None
+
+            # 1. Title (checks both list and grid title classes)
+            t_elems = card.find_elements(By.CSS_SELECTOR, "div.KzDlHZ") or \
+                      card.find_elements(By.CSS_SELECTOR, "div._4rR01T") or \
+                      card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or \
+                      card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or \
+                      card.find_elements(By.CSS_SELECTOR, "a.WKTcLC")
+            if t_elems:
+                title = t_elems[0].text.strip()
+
+            # 2. Price
+            p_elems = card.find_elements(By.CSS_SELECTOR, "div.Nx9bqj") or \
+                      card.find_elements(By.CSS_SELECTOR, "div._30jeq3")
+            if p_elems:
+                p_text = p_elems[0].text.replace("₹", "").replace(",", "").strip()
+                try:
+                    price = float(p_text)
+                except ValueError:
                     price = None
 
-                # Link
-                link_elem = (
-                    card.find_elements(By.CSS_SELECTOR, "a._1fQZEK") or
-                    card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or
-                    card.find_elements(By.CSS_SELECTOR, "a.VJA3rP") or
-                    card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or
-                    card.find_elements(By.CSS_SELECTOR, "a.WKTcLC")
-                )
-                link = "https://www.flipkart.com" + link_elem[0].get_attribute("href") if link_elem else "N/A"
-                # Fix double domain if href already contains full URL
-                if link_elem and link_elem[0].get_attribute("href").startswith("http"):
-                    link = link_elem[0].get_attribute("href")
+            # 3. Link
+            l_elems = card.find_elements(By.CSS_SELECTOR, "a.CGtC58") or \
+                      card.find_elements(By.CSS_SELECTOR, "a._1fQZEK") or \
+                      card.find_elements(By.CSS_SELECTOR, "a.s1Q9rs") or \
+                      card.find_elements(By.CSS_SELECTOR, "a.wjcEIp") or \
+                      card.find_elements(By.TAG_NAME, "a")
+            if l_elems:
+                raw_link = l_elems[0].get_attribute("href")
+                if raw_link:
+                    link = raw_link if raw_link.startswith("http") else "https://www.flipkart.com" + raw_link
 
-                if title != "N/A" and price:
-                    results.append({
-                        "Seller_name": "Flipkart Seller",
-                        "SKU": sku,
-                        "Category": category,
-                        "Region": "IN",
-                        "Advertised_price": price,
-                        "Marketplace": "Flipkart",
-                        "Screenshot": screenshot_name,
-                        "Live_link": link,
-                        "Last_time_collected": collected_at,
-                        "Product_Title": title
-                    })
-            except Exception:
-                continue
+            if title and price:
+                results.append({
+                    "Seller_name": "Flipkart Seller",
+                    "SKU": sku,
+                    "Category": category,
+                    "Region": "IN",
+                    "Advertised_price": price,
+                    "Marketplace": "Flipkart",
+                    "Screenshot": screenshot_name,
+                    "Live_link": link or "https://www.flipkart.com",
+                    "Last_time_collected": collected_at,
+                    "Product_Title": title
+                })
 
     except Exception as e:
-        print(f"    [Flipkart Error] {e}")
+        print(f"    [Flipkart Warning/Error]: {e}")
         driver.save_screenshot(screenshot_path)
 
-    print(f"    [Flipkart] Extracted {len(results)} listings.")
+    print(f"    [Flipkart] Successfully extracted {len(results)} valid product listings.")
     return results
 
 # ==============================================================================
-# 6. SAVE RESULTS TO INDIVIDUAL CSV FILE
+# 6. CSV SAVER
 # ==============================================================================
 def save_to_csv(records, filename):
-    """Writes scraped records to a CSV file in the visual_results folder."""
     fieldnames = [
         "Seller_name", "SKU", "Category", "Region", "Advertised_price",
         "Marketplace", "Screenshot", "Live_link", "Last_time_collected", "Product_Title"
@@ -299,16 +274,13 @@ def save_to_csv(records, filename):
 # ==============================================================================
 def main():
     print("=" * 70)
-    print("  VISUAL PRICE SCRAPER (Selenium + Chrome)")
+    print("  VISUAL PRICE SCRAPER (Selenium + Real Browser)")
     print("  Reading products from: scraping_input.csv")
     print("=" * 70)
 
-    # Load products from the dynamic input file
     products = load_input_products(INPUT_FILE)
     print(f"\nLoaded {len(products)} products to scrape.\n")
 
-    # Launch the visible Chrome browser
-    print("Launching Chrome browser...")
     driver = create_browser()
 
     try:
@@ -326,27 +298,25 @@ def main():
 
             all_results = []
 
-            # Scrape each requested platform
             if "amazon" in platforms:
                 amazon_results = scrape_amazon_visual(driver, query, sku, category, top_n=3)
                 all_results.extend(amazon_results)
-                time.sleep(2)
+                time.sleep(1.5)
 
             if "flipkart" in platforms:
                 flipkart_results = scrape_flipkart_visual(driver, query, sku, category, top_n=3)
                 all_results.extend(flipkart_results)
-                time.sleep(2)
+                time.sleep(1.5)
 
-            # Save this product's results to its own CSV file
             safe_category = category.replace(" / ", "_").replace(" ", "_")
             output_filename = f"{safe_category}_{sku}.csv"
             save_to_csv(all_results, output_filename)
 
     finally:
         print("\n" + "=" * 70)
-        print("Scraping complete! Closing browser...")
+        print("Scraping run complete! Closing browser...")
         driver.quit()
-        print(f"All results and screenshots saved in:")
+        print(f"All results & screenshots are inside:")
         print(f"  {OUTPUT_DIR}")
         print("=" * 70)
 
