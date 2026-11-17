@@ -1,7 +1,12 @@
+# Packages to Install
+# pip install playwright
+# playwright install chromium
+
 import os
 import csv
 import time
 import datetime
+import urllib.parse
 from playwright.sync_api import sync_playwright
 
 # ==============================================================================
@@ -13,7 +18,7 @@ OUTPUT_DIR = os.path.join(SCRIPT_DIR, "scraped_data")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ==============================================================================
-# 2. READ THE DYNAMIC INPUT FILE
+# 2. READ DYNAMIC INPUT FILE
 # ==============================================================================
 def load_input_products(filepath):
     products = []
@@ -25,35 +30,29 @@ def load_input_products(filepath):
     return products
 
 # ==============================================================================
-# 3. PLAYWRIGHT AMAZON SCRAPER
+# 3. PLAYWRIGHT AMAZON SCRAPER (DIRECT URL NAVIGATION + TEXT_CONTENT)
 # ==============================================================================
 def scrape_amazon_playwright(page, query, sku, category, top_n=3):
-    print(f"    [Playwright - Amazon] Navigating to amazon.in...")
+    print(f"    [Playwright - Amazon] Searching query: {query}...")
     results = []
     collected_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_cat = category.replace(" / ", "_").replace(" ", "_")
     screenshot_name = f"{safe_cat}_{sku}_amazon.png"
     screenshot_path = os.path.join(OUTPUT_DIR, screenshot_name)
 
+    encoded_q = urllib.parse.quote_plus(query)
+    search_url = f"https://www.amazon.in/s?k={encoded_q}"
+
     try:
-        # Navigate with a real desktop user-agent
-        page.goto("https://www.amazon.in", wait_until="domcontentloaded", timeout=30000)
-        time.sleep(1)
+        # Navigate directly to the search URL (bypasses homepage search typing & popups)
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(2)
 
-        # Type query in search bar (Playwright auto-waits for element)
-        search_box = page.locator("#twotabsearchtextbox")
-        search_box.fill("")
-        search_box.type(query, delay=25)
-        search_box.press("Enter")
-
-        # Wait for product results to appear
-        page.wait_for_selector("div[data-component-type='s-search-result']", timeout=15000)
-
-        # Scroll down slightly to ensure lazy-loaded listings render
+        # Scroll down slightly to trigger rendering of product images & prices
         page.mouse.wheel(0, 500)
         time.sleep(1.5)
 
-        # Capture high-res screenshot
+        # Capture search results screenshot
         page.screenshot(path=screenshot_path)
         print(f"    [Playwright - Amazon] Screenshot captured: {screenshot_name}")
 
@@ -69,27 +68,27 @@ def scrape_amazon_playwright(page, query, sku, category, top_n=3):
             link = None
 
             # 1. Title
-            title_elem = card.locator("h2 a span").first
-            if title_elem.count() > 0:
-                title = title_elem.inner_text().strip()
+            t_loc = card.locator("h2 a span, h2 span, h2 a").first
+            if t_loc.count() > 0:
+                title = (t_loc.text_content() or "").strip()
 
             # 2. Link
-            link_elem = card.locator("h2 a").first
-            if link_elem.count() > 0:
-                href = link_elem.get_attribute("href")
+            l_loc = card.locator("h2 a").first
+            if l_loc.count() > 0:
+                href = l_loc.get_attribute("href")
                 if href:
                     link = href if href.startswith("http") else "https://www.amazon.in" + href
 
-            # 3. Price (check offscreen text or whole price)
-            price_elem = card.locator(".a-price .a-offscreen").first
-            if price_elem.count() > 0:
-                raw_price = price_elem.inner_text().replace("₹", "").replace(",", "").replace(".", "").strip()
+            # 3. Price (Use text_content to read .a-offscreen and .a-price-whole)
+            p_loc = card.locator(".a-price .a-offscreen, .a-price-whole").first
+            if p_loc.count() > 0:
+                raw_price = (p_loc.text_content() or "").replace("₹", "").replace(",", "").replace(".", "").strip()
                 try:
                     price = float(raw_price)
                 except ValueError:
                     price = None
 
-            # Filter out non-matching small accessories
+            # Filter valid products (ignore cheap minor accessories)
             if title and price and price > 100:
                 results.append({
                     "Seller_name": "Amazon Seller",
@@ -99,7 +98,7 @@ def scrape_amazon_playwright(page, query, sku, category, top_n=3):
                     "Advertised_price": price,
                     "Marketplace": "Amazon",
                     "Screenshot": screenshot_name,
-                    "Live_link": link or "https://www.amazon.in",
+                    "Live_link": link or search_url,
                     "Last_time_collected": collected_at,
                     "Product_Title": title
                 })
@@ -115,21 +114,25 @@ def scrape_amazon_playwright(page, query, sku, category, top_n=3):
     return results
 
 # ==============================================================================
-# 4. PLAYWRIGHT FLIPKART SCRAPER
+# 4. PLAYWRIGHT FLIPKART SCRAPER (DIRECT URL - BYPASSES LOGIN POPUP 100%)
 # ==============================================================================
 def scrape_flipkart_playwright(page, query, sku, category, top_n=3):
-    print(f"    [Playwright - Flipkart] Navigating to flipkart.com...")
+    print(f"    [Playwright - Flipkart] Searching query: {query}...")
     results = []
     collected_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_cat = category.replace(" / ", "_").replace(" ", "_")
     screenshot_name = f"{safe_cat}_{sku}_flipkart.png"
     screenshot_path = os.path.join(OUTPUT_DIR, screenshot_name)
 
-    try:
-        page.goto("https://www.flipkart.com", wait_until="domcontentloaded", timeout=30000)
-        time.sleep(1)
+    encoded_q = urllib.parse.quote_plus(query)
+    search_url = f"https://www.flipkart.com/search?q={encoded_q}"
 
-        # Dismiss login popup if visible
+    try:
+        # Navigating directly to search URL completely bypasses the homepage login dialog
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(2)
+
+        # Dismiss login dialog if it ever appears over search page
         try:
             close_btn = page.locator("span._30XB9F, button._2KpZ6l._2doB4z").first
             if close_btn.is_visible():
@@ -138,24 +141,15 @@ def scrape_flipkart_playwright(page, query, sku, category, top_n=3):
         except Exception:
             pass
 
-        # Search bar
-        search_box = page.locator("input[name='q'], input[title*='Search']").first
-        search_box.fill("")
-        search_box.type(query, delay=25)
-        search_box.press("Enter")
-
-        # Wait for price symbols to appear
-        page.wait_for_selector("//*[contains(text(), '₹')]", timeout=15000)
-
-        # Scroll down slightly so product cards render
+        # Scroll down slightly to trigger lazy-loaded cards
         page.mouse.wheel(0, 400)
         time.sleep(1.5)
 
         page.screenshot(path=screenshot_path)
         print(f"    [Playwright - Flipkart] Screenshot captured: {screenshot_name}")
 
-        # Locate product cards using our resilient XPath
-        cards = page.locator("//div[@data-id and .//*[contains(text(), '₹')]]").all()
+        # Locate product cards: works for both List view (Laptops) and Grid view (Toners/Printers)
+        cards = page.locator("div._75nlfW, div.tUxRFH, div.slAVV4, div.cPHDOP, div[data-id]").all()
         if not cards:
             cards = page.locator("//a[contains(@href, '/p/') and .//*[contains(text(), '₹')]]").all()
 
@@ -167,39 +161,44 @@ def scrape_flipkart_playwright(page, query, sku, category, top_n=3):
             price = None
             link = None
 
-            # 1. Price
-            p_elem = card.locator(".//*[contains(text(), '₹')]").first
-            if p_elem.count() > 0:
-                raw_txt = p_elem.inner_text().strip()
-                if "₹" in raw_txt:
+            # 1. Price: Flipkart uses div.Nx9bqj and div._30jeq3
+            p_loc = card.locator("div.Nx9bqj, div._30jeq3").first
+            if p_loc.count() > 0:
+                raw_txt = (p_loc.text_content() or "").replace("₹", "").replace(",", "").strip()
+                try:
+                    price = float(raw_txt)
+                except ValueError:
+                    price = None
+            else:
+                # Fallback to any ₹ text
+                p_any = card.locator(".//*[contains(text(), '₹')]").first
+                if p_any.count() > 0:
+                    raw_txt = (p_any.text_content() or "").strip()
                     clean_num = raw_txt.split("₹")[-1].split()[0].replace(",", "").strip()
                     try:
                         val = float(clean_num)
                         if val > 50:
                             price = val
                     except ValueError:
-                        price = None
+                        pass
 
-            # 2. Title
-            t_elem = card.locator(".//div[contains(@class, 'KzDlHZ') or contains(@class, '_4rR01T')]").first
-            if t_elem.count() > 0:
-                title = t_elem.inner_text().strip()
+            # 2. Title: Flipkart uses div.KzDlHZ, div._4rR01T, a.wjcEIp, a.s1Q9rs
+            t_loc = card.locator("div.KzDlHZ, div._4rR01T, a.wjcEIp, a.s1Q9rs, a.WKTcLC").first
+            if t_loc.count() > 0:
+                title = (t_loc.text_content() or "").strip()
             else:
-                # Fallback to link text or img alt
-                link_t = card.locator(".//a[contains(@class, 'wjcEIp') or contains(@class, 's1Q9rs')]").first
-                if link_t.count() > 0:
-                    title = link_t.inner_text().strip()
-                else:
-                    img_elem = card.locator(".//img[@alt]").first
-                    if img_elem.count() > 0:
-                        alt = img_elem.get_attribute("alt")
-                        if alt and len(alt) > 5:
-                            title = alt.strip()
+                img_loc = card.locator("img[alt]").first
+                if img_loc.count() > 0:
+                    alt_txt = img_loc.get_attribute("alt")
+                    if alt_txt and len(alt_txt) > 5:
+                        title = alt_txt.strip()
 
             # 3. Link
-            l_elem = card.locator(".//a[contains(@href, '/p/')]").first
-            if l_elem.count() > 0:
-                href = l_elem.get_attribute("href")
+            l_loc = card.locator("a[href*='/p/']").first
+            if l_loc.count() == 0:
+                l_loc = card.locator("a[href]").first
+            if l_loc.count() > 0:
+                href = l_loc.get_attribute("href")
                 if href:
                     link = href if href.startswith("http") else "https://www.flipkart.com" + href
 
@@ -212,7 +211,7 @@ def scrape_flipkart_playwright(page, query, sku, category, top_n=3):
                     "Advertised_price": price,
                     "Marketplace": "Flipkart",
                     "Screenshot": screenshot_name,
-                    "Live_link": link or "https://www.flipkart.com",
+                    "Live_link": link or search_url,
                     "Last_time_collected": collected_at,
                     "Product_Title": title
                 })
@@ -248,7 +247,7 @@ def save_to_csv(records, filename):
 # ==============================================================================
 def main():
     print("=" * 70)
-    print("  PLAYWRIGHT PRICE SCRAPER (Modern Chromium Engine)")
+    print("  PLAYWRIGHT PRICE SCRAPER (Direct URL Navigation + Resilient Parser)")
     print(f"  Reading products from: {INPUT_FILE}")
     print(f"  Saving results in:     {OUTPUT_DIR}")
     print("=" * 70)
@@ -256,8 +255,8 @@ def main():
     products = load_input_products(INPUT_FILE)
     print(f"\nLoaded {len(products)} products to scrape.\n")
 
-    # Launch Playwright Chromium in visible mode (headless=False) so you can watch
     with sync_playwright() as p:
+        # Launch Chromium visibly so you can watch
         browser = p.chromium.launch(
             headless=False,
             args=["--start-maximized", "--disable-blink-features=AutomationControlled"]
