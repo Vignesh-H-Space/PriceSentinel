@@ -3,7 +3,6 @@ import csv
 import urllib.parse
 import datetime
 import scrapy
-from scrapy.crawler import CrawlerProcess
 
 # ==============================================================================
 # 1. PATHS & CONFIGURATION
@@ -19,12 +18,25 @@ DEFAULT_USER_AGENT = (
     "Chrome/122.0.0.0 Safari/537.36"
 )
 
-# ==============================================================================
-# 2. READ DYNAMIC INPUT PRODUCTS
-# ==============================================================================
-def load_input_products(filepath):
+FIELDNAMES = [
+    "Seller_name", "SKU", "Category", "Region", "Advertised_price",
+    "Marketplace", "Screenshot", "Live_link", "Last_time_collected", "Product_Title"
+]
+
+def append_to_csv(filename, row_dict):
+    """Safely appends a scraped listing into the product's CSV file."""
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
+    with open(filepath, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row_dict)
+
+def load_input_products():
     products = []
-    with open(filepath, mode="r", encoding="utf-8") as f:
+    with open(INPUT_FILE, mode="r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             row["platforms"] = [p.strip().lower() for p in row["platforms"].split(";")]
@@ -32,61 +44,35 @@ def load_input_products(filepath):
     return products
 
 # ==============================================================================
-# 3. SCRAPY ITEM DEFINITION
-# ==============================================================================
-class ProductPriceItem(scrapy.Item):
-    Seller_name = scrapy.Field()
-    SKU = scrapy.Field()
-    Category = scrapy.Field()
-    Region = scrapy.Field()
-    Advertised_price = scrapy.Field()
-    Marketplace = scrapy.Field()
-    Screenshot = scrapy.Field()
-    Live_link = scrapy.Field()
-    Last_time_collected = scrapy.Field()
-    Product_Title = scrapy.Field()
-    output_filename = scrapy.Field()
-
-# ==============================================================================
-# 4. ITEM PIPELINE: ROUTER TO 9 SEPARATE CSV FILES
-# ==============================================================================
-class MultiCsvExportPipeline:
-    def __init__(self):
-        self.files = {}
-        self.writers = {}
-        self.fieldnames = [
-            "Seller_name", "SKU", "Category", "Region", "Advertised_price",
-            "Marketplace", "Screenshot", "Live_link", "Last_time_collected", "Product_Title"
-        ]
-
-    def process_item(self, item, spider=None):
-        fname = item["output_filename"]
-        filepath = os.path.join(OUTPUT_DIR, fname)
-
-        if fname not in self.files:
-            f = open(filepath, mode="w", newline="", encoding="utf-8")
-            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
-            writer.writeheader()
-            self.files[fname] = f
-            self.writers[fname] = writer
-
-        row = {k: item[k] for k in self.fieldnames if k in item}
-        self.writers[fname].writerow(row)
-        return item
-
-    def close_spider(self, spider=None):
-        for f in self.files.values():
-            f.close()
-
-# ==============================================================================
-# 5. SCRAPY SPIDER
+# 2. THE SCRAPY SPIDER CLASS
 # ==============================================================================
 class MarketplaceSpider(scrapy.Spider):
     name = "marketplace_spider"
 
+    custom_settings = {
+        # Completely disable the robots.txt middleware so it can never block requests
+        "DOWNLOADER_MIDDLEWARES": {
+            "scrapy.downloadermiddlewares.robotstxt.RobotsTxtMiddleware": None,
+        },
+        "ROBOTSTXT_OBEY": False,
+        "USER_AGENT": DEFAULT_USER_AGENT,
+        "CONCURRENT_REQUESTS": 2,
+        "DOWNLOAD_DELAY": 1.0,
+        "LOG_LEVEL": "INFO",
+        "COOKIES_ENABLED": True,
+        "RETRY_TIMES": 3
+    }
+
     def start_requests(self):
-        products = load_input_products(INPUT_FILE)
-        print(f"[*] Spider initialized with {len(products)} products to crawl.")
+        products = load_input_products()
+        self.logger.info(f"Loaded {len(products)} products from input file.")
+
+        headers = {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/"
+        }
 
         for prod in products:
             sku = prod["sku"]
@@ -103,13 +89,6 @@ class MarketplaceSpider(scrapy.Spider):
                 "query": query,
                 "output_filename": out_name,
                 "collected_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-
-            headers = {
-                "User-Agent": DEFAULT_USER_AGENT,
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Referer": "https://www.google.com/"
             }
 
             # Amazon Request
@@ -173,21 +152,21 @@ class MarketplaceSpider(scrapy.Spider):
 
             if title and price and price > 100:
                 count += 1
-                item = ProductPriceItem()
-                item["Seller_name"] = "Amazon Seller"
-                item["SKU"] = sku
-                item["Category"] = cat
-                item["Region"] = "IN"
-                item["Advertised_price"] = price
-                item["Marketplace"] = "Amazon"
-                item["Screenshot"] = screenshot_placeholder
-                item["Live_link"] = link
-                item["Last_time_collected"] = collected_at
-                item["Product_Title"] = title.strip()
-                item["output_filename"] = out_name
-                yield item
+                row = {
+                    "Seller_name": "Amazon Seller",
+                    "SKU": sku,
+                    "Category": cat,
+                    "Region": "IN",
+                    "Advertised_price": price,
+                    "Marketplace": "Amazon",
+                    "Screenshot": screenshot_placeholder,
+                    "Live_link": link,
+                    "Last_time_collected": collected_at,
+                    "Product_Title": title.strip()
+                }
+                append_to_csv(out_name, row)
 
-        print(f"  [+] Amazon: Found {count} items for SKU {sku}")
+        self.logger.info(f"[Amazon] Extracted {count} listings for SKU {sku}")
 
     def parse_flipkart(self, response):
         sku = response.meta["sku"]
@@ -225,54 +204,18 @@ class MarketplaceSpider(scrapy.Spider):
 
             if title and price and price > 50:
                 count += 1
-                item = ProductPriceItem()
-                item["Seller_name"] = "Flipkart Seller"
-                item["SKU"] = sku
-                item["Category"] = cat
-                item["Region"] = "IN"
-                item["Advertised_price"] = price
-                item["Marketplace"] = "Flipkart"
-                item["Screenshot"] = screenshot_placeholder
-                item["Live_link"] = link
-                item["Last_time_collected"] = collected_at
-                item["Product_Title"] = title.strip()
-                item["output_filename"] = out_name
-                yield item
+                row = {
+                    "Seller_name": "Flipkart Seller",
+                    "SKU": sku,
+                    "Category": cat,
+                    "Region": "IN",
+                    "Advertised_price": price,
+                    "Marketplace": "Flipkart",
+                    "Screenshot": screenshot_placeholder,
+                    "Live_link": link,
+                    "Last_time_collected": collected_at,
+                    "Product_Title": title.strip()
+                }
+                append_to_csv(out_name, row)
 
-        print(f"  [+] Flipkart: Found {count} items for SKU {sku}")
-
-# ==============================================================================
-# 6. RUNNER EXECUTION
-# ==============================================================================
-def main():
-    print("=" * 70)
-    print("  SCRAPY CRAWLER (Concurrent Asynchronous Engine)")
-    print(f"  Reading products from: {INPUT_FILE}")
-    print(f"  Output directory:      {OUTPUT_DIR}")
-    print("=" * 70)
-
-    # Configure Scrapy settings directly in the CrawlerProcess
-    settings = {
-        "USER_AGENT": DEFAULT_USER_AGENT,
-        "ROBOTSTXT_OBEY": False,         # Crucial: disables robots.txt blocking
-        "CONCURRENT_REQUESTS": 2,        # 2 concurrent requests
-        "DOWNLOAD_DELAY": 1.0,           # Respectful delay
-        "ITEM_PIPELINES": {
-            "__main__.MultiCsvExportPipeline": 300
-        },
-        "LOG_LEVEL": "WARNING",          # Keep terminal clean; warnings/errors only
-        "COOKIES_ENABLED": True,
-        "RETRY_TIMES": 3
-    }
-
-    process = CrawlerProcess(settings=settings)
-    process.crawl(MarketplaceSpider)
-    process.start()
-
-    print("\n" + "=" * 70)
-    print(f"Scrapy crawl completed! Output files saved in:")
-    print(f"  {OUTPUT_DIR}")
-    print("=" * 70)
-
-if __name__ == "__main__":
-    main()
+        self.logger.info(f"[Flipkart] Extracted {count} listings for SKU {sku}")
