@@ -107,8 +107,25 @@ def populate_violation_table(conn):
     total_inserted = cursor.rowcount
     print(f"      -> Successfully inserted {total_inserted:,} violation records into MySQL `violation` table.")
 
-    # Fetch top 10 sample violations to embed in the Word document notice
+    # Fetch top 10 unique product SKUs with highest shortfall (prevents same SKU repeating)
     query_samples = """
+        WITH RankedViolations AS (
+            SELECT 
+                Violation_date,
+                homologated_name,
+                seller_name,
+                Marketplace,
+                SKU,
+                Sub_category,
+                MAP_Price,
+                COALESCE(Promotional_price, MAP_Price) AS Effective_Price,
+                Advertised_price,
+                Price_Difference,
+                Violation_Percentage,
+                Severity_Level,
+                ROW_NUMBER() OVER (PARTITION BY SKU ORDER BY Price_Difference DESC) as rn
+            FROM violation
+        )
         SELECT 
             Violation_date,
             homologated_name,
@@ -117,12 +134,13 @@ def populate_violation_table(conn):
             SKU,
             Sub_category,
             MAP_Price,
-            COALESCE(Promotional_price, MAP_Price) AS Effective_Price,
+            Effective_Price,
             Advertised_price,
             Price_Difference,
             Violation_Percentage,
             Severity_Level
-        FROM violation
+        FROM RankedViolations
+        WHERE rn = 1
         ORDER BY Price_Difference DESC
         LIMIT 10;
     """
