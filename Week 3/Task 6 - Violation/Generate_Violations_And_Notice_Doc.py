@@ -291,9 +291,9 @@ def create_violation_word_document(total_violations, sample_violations):
         row_cells[1].text = str(h_name or s_name)[:20]
         row_cells[2].text = str(mkt)
         row_cells[3].text = str(sku)
-        row_cells[4].text = f"${adv_p:,.2f}"
-        row_cells[5].text = f"${eff_p:,.2f}"
-        row_cells[6].text = f"-${diff_p:,.2f} ({v_pct}%)"
+        row_cells[4].text = f"₹{adv_p:,.2f}"
+        row_cells[5].text = f"₹{eff_p:,.2f}"
+        row_cells[6].text = f"-₹{diff_p:,.2f} ({v_pct}%)"
 
         for idx, c in enumerate(row_cells):
             p = c.paragraphs[0]
