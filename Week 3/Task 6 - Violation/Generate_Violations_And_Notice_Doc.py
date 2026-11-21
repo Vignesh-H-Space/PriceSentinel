@@ -50,7 +50,7 @@ def populate_violation_table(conn):
     """
     cursor.execute(create_table_sql)
 
-    print("[2/3] Extracting and calculating violations from `price_monitoring`...")
+    print("[2/3] Extracting and calculating violations based on promotional exemption rules...")
     insert_sql = """
         INSERT INTO violation (
             SKU,
@@ -83,23 +83,51 @@ def populate_violation_table(conn):
             LPP,
             Promotional_price,
             Advertised_price,
-            -- Price difference = Effective Threshold - Advertised Price
-            ROUND(COALESCE(Promotional_price, MAP_Price) - Advertised_price, 4) AS Price_Difference,
-            -- Violation percentage = (Price Difference / Effective Threshold) * 100
-            ROUND(((COALESCE(Promotional_price, MAP_Price) - Advertised_price) / COALESCE(Promotional_price, MAP_Price)) * 100, 2) AS Violation_Percentage,
-            -- Violation Classification
+            -- Price difference against the effective allowed floor
+            ROUND(
+                CASE 
+                    WHEN Promotional_price IS NOT NULL THEN (Promotional_price - Advertised_price)
+                    ELSE (MAP_Price - Advertised_price)
+                END, 4
+            ) AS Price_Difference,
+            -- Violation percentage against the effective allowed floor
+            ROUND(
+                (
+                    CASE 
+                        WHEN Promotional_price IS NOT NULL THEN (Promotional_price - Advertised_price)
+                        ELSE (MAP_Price - Advertised_price)
+                    END
+                    / 
+                    CASE 
+                        WHEN Promotional_price IS NOT NULL THEN Promotional_price
+                        ELSE MAP_Price
+                    END
+                ) * 100, 2
+            ) AS Violation_Percentage,
+            -- Violation Classification:
+            -- 1. If in Promotional SKUs: Only violates if below Promotional_price (LPP is ignored!)
+            -- 2. If NOT in Promotional SKUs: Flags LPP Breach or MAP Violation
             CASE 
+                WHEN Promotional_price IS NOT NULL THEN 'Promotional MAP Breach'
                 WHEN Advertised_price < LPP THEN 'LPP Breach'
                 ELSE 'MAP Violation'
             END AS Violation_Type,
             -- Severity Classification
             CASE 
+                WHEN Promotional_price IS NOT NULL THEN 'HIGH'
                 WHEN Advertised_price < LPP THEN 'CRITICAL'
                 ELSE 'HIGH'
             END AS Severity_Level
         FROM price_monitoring
-        WHERE Advertised_price < COALESCE(Promotional_price, MAP_Price)
-          AND Advertised_price > 0;
+        WHERE Advertised_price > 0
+          AND (
+              -- Case 1: SKU is on Promotion -> ONLY a violation if Advertised_price < Promotional_price!
+              -- (If Advertised_price >= Promotional_price, NO VIOLATION regardless of LPP!)
+              (Promotional_price IS NOT NULL AND Advertised_price < Promotional_price)
+              OR
+              -- Case 2: SKU is NOT on Promotion -> Violates if Advertised_price < MAP_Price
+              (Promotional_price IS NULL AND Advertised_price < MAP_Price)
+          );
     """
     cursor.execute(insert_sql)
     conn.commit()
@@ -235,7 +263,7 @@ def create_violation_word_document(total_violations, sample_violations):
     table.autofit = False
 
     # Header Row
-    headers = ["Date", "Seller Name", "Marketplace", "SKU", "Advertised", "MAP Price", "Shortfall"]
+    headers = ["Date", "Seller Name", "Marketplace", "SKU", "Advertised", "Authorized Floor", "Shortfall"]
     hdr_cells = table.rows[0].cells
     for i, title in enumerate(headers):
         hdr_cells[i].text = title
