@@ -69,7 +69,8 @@ SELECT
     CASE 
         WHEN pr.Promotion = '15% off' THEN ROUND(p.MAP * 0.85, 4)
         WHEN pr.Promotion = '20% off ink' THEN ROUND(p.MAP * 0.80, 4)
-        WHEN pr.Promotion = '$10 off laser jet' THEN ROUND(p.MAP - 10.00, 4)
+        -- Converted $10 USD to INR equivalent (~83 INR/USD) = 830.00 off MAP
+        WHEN pr.Promotion = '$10 off laser jet' THEN ROUND(p.MAP - 830.00, 4)
         ELSE NULL
     END AS Promotional_price
 FROM seller s
