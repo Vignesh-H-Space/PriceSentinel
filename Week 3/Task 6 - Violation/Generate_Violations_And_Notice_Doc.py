@@ -1,10 +1,11 @@
 import os
+import csv
 import time
 import datetime
 import mysql.connector
 
 # ==============================================================================
-# 1. DATABASE CONFIGURATION
+# 1. DATABASE CONFIGURATION & FILE PATHS
 # ==============================================================================
 db_config = {
     'host': 'localhost',
@@ -15,13 +16,14 @@ db_config = {
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCX_PATH = os.path.join(SCRIPT_DIR, "MAP_Violation_Notice_Email.docx")
+CSV_EXPORT_PATH = os.path.join(SCRIPT_DIR, "Full_Marketplace_Violations_Ledger.csv")
 
 # ==============================================================================
-# 2. STEP 1: CREATE VIOLATION TABLE & POPULATE FROM PRICE_MONITORING
+# 2. STEP 1: CREATE & POPULATE VIOLATION TABLE
 # ==============================================================================
 def populate_violation_table(conn):
     cursor = conn.cursor()
-    print("[1/3] Creating `violation` table in MySQL...")
+    print("[1/4] Creating `violation` table in MySQL...")
 
     cursor.execute("DROP TABLE IF EXISTS violation;")
     create_table_sql = """
@@ -50,7 +52,7 @@ def populate_violation_table(conn):
     """
     cursor.execute(create_table_sql)
 
-    print("[2/3] Extracting and calculating violations based on promotional exemption rules...")
+    print("[2/4] Detecting violations (Trigger: Advertised Price < LPP, or < Promo Price if on Promo)...")
     insert_sql = """
         INSERT INTO violation (
             SKU,
@@ -109,7 +111,6 @@ def populate_violation_table(conn):
                 WHEN Promotional_price IS NOT NULL THEN 'Promotional Floor Breach'
                 ELSE 'LPP Breach'
             END AS Violation_Type,
-            -- Severity Classification
             'CRITICAL' AS Severity_Level
         FROM price_monitoring
         WHERE Advertised_price > 0
@@ -127,8 +128,18 @@ def populate_violation_table(conn):
     total_inserted = cursor.rowcount
     print(f"      -> Successfully inserted {total_inserted:,} violation records into MySQL `violation` table.")
 
-    # Fetch top 10 unique product SKUs with highest shortfall (prevents same SKU repeating)
-    query_samples = """
+    # Breakdown by Violation Type
+    cursor.execute("""
+        SELECT Violation_Type, COUNT(*) 
+        FROM violation 
+        GROUP BY Violation_Type;
+    """)
+    stats_breakdown = dict(cursor.fetchall())
+    lpp_count = stats_breakdown.get('LPP Breach', 0)
+    promo_count = stats_breakdown.get('Promotional Floor Breach', 0)
+
+    # Fetch Top 10 unique product SKUs with highest shortfall for the Word doc
+    query_top10 = """
         WITH RankedViolations AS (
             SELECT 
                 Violation_date,
@@ -164,17 +175,70 @@ def populate_violation_table(conn):
         ORDER BY Price_Difference DESC
         LIMIT 10;
     """
-    cursor.execute(query_samples)
-    sample_violations = cursor.fetchall()
+    cursor.execute(query_top10)
+    top10_violations = cursor.fetchall()
 
     cursor.close()
-    return total_inserted, sample_violations
+    return total_inserted, lpp_count, promo_count, top10_violations
 
 # ==============================================================================
-# 3. STEP 2: CREATE WORD DOCUMENT (.DOCX) FOR FORMAL VIOLATION NOTICE
+# 3. STEP 2: EXPORT ALL 122,823 VIOLATIONS TO A CLEAN CSV REPORT
 # ==============================================================================
-def create_violation_word_document(total_violations, sample_violations):
-    print("[3/3] Generating formal Violation Notice document (Word format)...")
+def export_all_violations_to_csv(conn):
+    print(f"[3/4] Exporting complete violations ledger to CSV: {os.path.basename(CSV_EXPORT_PATH)}...")
+    cursor = conn.cursor()
+
+    export_query = """
+        SELECT 
+            Violation_ID,
+            Violation_date,
+            SKU,
+            Category,
+            Sub_category,
+            Marketplace,
+            Region,
+            seller_name,
+            homologated_name,
+            MAP_Price,
+            LPP,
+            Promotional_price,
+            Advertised_price,
+            Price_Difference,
+            Violation_Percentage,
+            Violation_Type,
+            Severity_Level
+        FROM violation
+        ORDER BY Violation_date, Price_Difference DESC;
+    """
+    cursor.execute(export_query)
+
+    csv_headers = [
+        "Violation_ID", "Violation_Date", "SKU", "Category", "Sub_Category",
+        "Marketplace", "Region", "Seller_Name", "Homologated_Name",
+        "MAP_Price", "LPP", "Promotional_Price", "Advertised_Price",
+        "Price_Difference", "Violation_Percentage", "Violation_Type", "Severity_Level"
+    ]
+
+    count = 0
+    with open(CSV_EXPORT_PATH, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_headers)
+        
+        while True:
+            rows = cursor.fetchmany(10000)
+            if not rows:
+                break
+            writer.writerows(rows)
+            count += len(rows)
+
+    cursor.close()
+    print(f"      -> Successfully exported all {count:,} records to CSV: {CSV_EXPORT_PATH}")
+
+# ==============================================================================
+# 4. STEP 3: CREATE FORMAL WORD NOTICE (.DOCX) WITH TOP 10 EVIDENCE
+# ==============================================================================
+def create_violation_word_document(total_violations, lpp_count, promo_count, top10_violations):
+    print("[4/4] Generating formal Violation Notice document (Word format)...")
     
     try:
         from docx import Document
@@ -185,8 +249,7 @@ def create_violation_word_document(total_violations, sample_violations):
         from docx.oxml.ns import qn
     except ImportError:
         print("\n[Notice] 'python-docx' library is not yet installed.")
-        print("         Please run: pip install python-docx")
-        print("         Then re-run this script to generate the Word document.\n")
+        print("         Please run: pip install python-docx\n")
         return
 
     doc = Document()
@@ -211,7 +274,7 @@ def create_violation_word_document(total_violations, sample_violations):
     sub_run = sub_p.add_run("FORMAL NOTICE OF MINIMUM ADVERTISED PRICE (MAP) POLICY VIOLATION")
     sub_run.font.size = Pt(12)
     sub_run.font.bold = True
-    sub_run.font.color.rgb = RGBColor(192, 0, 0)  # Red alert header
+    sub_run.font.color.rgb = RGBColor(192, 0, 0)
 
     doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
@@ -225,6 +288,8 @@ def create_violation_word_document(total_violations, sample_violations):
     meta_p.add_run("Brand Integrity & Authorized Channel Governance Office\n")
     meta_p.add_run("Subject: ").bold = True
     meta_p.add_run("[ACTION REQUIRED] URGENT: Official Cease & Desist / MAP Price Rectification Notice\n")
+    meta_p.add_run("Attachment: ").bold = True
+    meta_p.add_run("Full_Marketplace_Violations_Ledger.csv (Complete Itemized Audit)\n")
     meta_p.add_run("Status: ").bold = True
     status_run = meta_p.add_run("POLICY INFRACTION DETECTED - 24-HOUR CURE PERIOD")
     status_run.font.color.rgb = RGBColor(192, 0, 0)
@@ -236,18 +301,20 @@ def create_violation_word_document(total_violations, sample_violations):
     p1 = doc.add_paragraph()
     p1.add_run(
         "Dear Store Manager / Channel Partner,\n\n"
-        "This official notice is transmitted by the Brand Integrity and Market Monitoring Unit. "
-        "Through our continuous automated price monitoring systems, your online storefronts have been "
-        "identified as advertising products at prices strictly below the established Minimum Advertised Price (MAP) "
-        "and Lowest Possible Price (LPP) policy thresholds.\n\n"
-        f"A total of {total_violations:,} violation incidents were logged during our latest market surveillance audit across regional marketplace channels. "
-        "Advertising products below our authorized thresholds constitutes a material breach of your Reseller Agreement and undermines fair market practices."
+        "This official communication is issued by the Corporate Brand Integrity and Market Surveillance Directorate. "
+        "Through our continuous market monitoring operations across regional e-commerce channels, your storefronts have been "
+        "identified as advertising products below authorized policy price floors.\n\n"
+        f"During our 15-day surveillance window, our automated audit identified a total of {total_violations:,} policy infractions, comprising:\n"
+        f"  • {lpp_count:,} Critical LPP Floor Breaches (unauthorized severe discounting below Lowest Possible Price)\n"
+        f"  • {promo_count:,} Promotional Floor Breaches (discounting below authorized Q4 promotional floors)\n\n"
+        "Advertising products below our authorized price floors constitutes a material breach of your Reseller Agreement. "
+        "For your full itemized records, refer to the attached spreadsheet: Full_Marketplace_Violations_Ledger.csv."
     )
 
-    # 4. Evidence Table
-    doc.add_heading("Summary Evidence of Recent Price Infractions", level=2)
-    evidence_desc = doc.add_paragraph(
-        "The following schedule details verified price infractions captured directly from marketplace channels:"
+    # 4. Top 10 Evidence Table
+    doc.add_heading("Top 10 Critical Product Infractions (Sample Evidence)", level=2)
+    doc.add_paragraph(
+        "The following schedule details the top 10 unique product infractions by price shortfall captured during the audit:"
     )
 
     table = doc.add_table(rows=1, cols=7)
@@ -275,8 +342,8 @@ def create_violation_word_document(total_violations, sample_violations):
         shd.set(qn('w:fill'), '1F4E79')
         tcPr.append(shd)
 
-    # Populate Sample Rows
-    for row in sample_violations:
+    # Populate Top 10 Sample Rows
+    for row in top10_violations:
         v_date, h_name, s_name, mkt, sku, subcat, map_p, eff_p, adv_p, diff_p, v_pct, sev = row
         row_cells = table.add_row().cells
         row_cells[0].text = str(v_date)
@@ -301,22 +368,18 @@ def create_violation_word_document(total_violations, sample_violations):
 
     # 5. Remediation Mandate & Penalty Warning
     doc.add_heading("Mandatory Remediation Actions (24-Hour Notice)", level=2)
-    p_remedy = doc.add_paragraph()
-    p_remedy.add_run(
-        "To restore compliance and avoid commercial escalations, you must execute the following actions immediately:\n\n"
-    )
-    doc.add_paragraph("1. Adjust Advertised Pricing: Immediately update your active marketplace listings to reflect authorized MAP thresholds or above.", style='List Number')
-    doc.add_paragraph("2. Audit Automated Re-pricing Algorithms: Ensure any third-party repricing software does not undercut authorized floors.", style='List Number')
-    doc.add_paragraph("3. Confirmation of Cure: Reply to this notice within twenty-four (24) hours verifying price rectification.", style='List Number')
+    doc.add_paragraph("1. Immediate Price Adjustment: Update all active marketplace listings to authorized price floors or above within twenty-four (24) hours.", style='List Number')
+    doc.add_paragraph("2. Repricing Software Audit: Immediately reconfigure automated algorithmic repricers to respect established price floors.", style='List Number')
+    doc.add_paragraph("3. Confirmation of Compliance: Reply to this notice confirming price rectification across all listed storefronts.", style='List Number')
 
     p_warn = doc.add_paragraph()
     p_warn.paragraph_format.space_before = Pt(8)
     warn_run = p_warn.add_run(
         "CONSEQUENCES OF NON-COMPLIANCE:\n"
-        "Failure to correct the designated pricing within 24 hours will result in immediate escalation, including: "
-        "(a) Revocation of Authorized Partner Status, (b) Cancellation of pending purchase orders, "
-        "(c) Formal brand de-listing requests submitted directly to the respective marketplace governance bodies, and "
-        "(d) Referral to Corporate Legal Counsel for breach of contract damages."
+        "Failure to correct the designated pricing within 24 hours will result in immediate commercial escalations, including: "
+        "(a) Revocation of Authorized Partner Status, (b) Cancellation of pending shipments, "
+        "(c) Formal brand de-listing complaints submitted directly to marketplace trust & safety teams, and "
+        "(d) Referral to Corporate Legal Counsel for commercial damages."
     )
     warn_run.font.bold = True
     warn_run.font.size = Pt(9.5)
@@ -337,22 +400,23 @@ def create_violation_word_document(total_violations, sample_violations):
     print(f"         {DOCX_PATH}")
 
 # ==============================================================================
-# 4. MAIN ENTRYPOINT
+# 5. MAIN ENTRYPOINT
 # ==============================================================================
 def main():
     print("=" * 70)
-    print("  TASK 6: POPULATING VIOLATIONS TABLE & DRAFTING VIOLATION NOTICE DOC")
+    print("  TASK 6: VIOLATIONS ANALYSIS, FULL CSV LEDGER & WORD NOTICE")
     print("=" * 70)
 
     conn = mysql.connector.connect(**db_config)
     try:
-        total_violations, sample_violations = populate_violation_table(conn)
-        create_violation_word_document(total_violations, sample_violations)
+        total_violations, lpp_count, promo_count, top10_violations = populate_violation_table(conn)
+        export_all_violations_to_csv(conn)
+        create_violation_word_document(total_violations, lpp_count, promo_count, top10_violations)
     finally:
         conn.close()
 
     print("=" * 70)
-    print("  TASK 6 EXECUTION COMPLETE!")
+    print("  TASK 6 COMPLETED SUCCESSFULLY!")
     print("=" * 70)
 
 if __name__ == "__main__":
