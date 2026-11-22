@@ -83,50 +83,42 @@ def populate_violation_table(conn):
             LPP,
             Promotional_price,
             Advertised_price,
-            -- Price difference against the effective allowed floor
+            -- Price difference against the effective floor (Promotional_price if promo, else LPP)
             ROUND(
                 CASE 
                     WHEN Promotional_price IS NOT NULL THEN (Promotional_price - Advertised_price)
-                    ELSE (MAP_Price - Advertised_price)
+                    ELSE (LPP - Advertised_price)
                 END, 4
             ) AS Price_Difference,
-            -- Violation percentage against the effective allowed floor
+            -- Violation percentage against the effective floor
             ROUND(
                 (
                     CASE 
                         WHEN Promotional_price IS NOT NULL THEN (Promotional_price - Advertised_price)
-                        ELSE (MAP_Price - Advertised_price)
+                        ELSE (LPP - Advertised_price)
                     END
                     / 
                     CASE 
                         WHEN Promotional_price IS NOT NULL THEN Promotional_price
-                        ELSE MAP_Price
+                        ELSE LPP
                     END
                 ) * 100, 2
             ) AS Violation_Percentage,
             -- Violation Classification:
-            -- 1. If in Promotional SKUs: Only violates if below Promotional_price (LPP is ignored!)
-            -- 2. If NOT in Promotional SKUs: Flags LPP Breach or MAP Violation
             CASE 
-                WHEN Promotional_price IS NOT NULL THEN 'Promotional MAP Breach'
-                WHEN Advertised_price < LPP THEN 'LPP Breach'
-                ELSE 'MAP Violation'
+                WHEN Promotional_price IS NOT NULL THEN 'Promotional Floor Breach'
+                ELSE 'LPP Breach'
             END AS Violation_Type,
             -- Severity Classification
-            CASE 
-                WHEN Promotional_price IS NOT NULL THEN 'HIGH'
-                WHEN Advertised_price < LPP THEN 'CRITICAL'
-                ELSE 'HIGH'
-            END AS Severity_Level
+            'CRITICAL' AS Severity_Level
         FROM price_monitoring
         WHERE Advertised_price > 0
           AND (
-              -- Case 1: SKU is on Promotion -> ONLY a violation if Advertised_price < Promotional_price!
-              -- (If Advertised_price >= Promotional_price, NO VIOLATION regardless of LPP!)
+              -- Case 1: SKU on Promotion -> Triggers only when Advertised_price < Promotional_price
               (Promotional_price IS NOT NULL AND Advertised_price < Promotional_price)
               OR
-              -- Case 2: SKU is NOT on Promotion -> Violates if Advertised_price < MAP_Price
-              (Promotional_price IS NULL AND Advertised_price < MAP_Price)
+              -- Case 2: Standard SKU (Not on promo) -> Triggers when Advertised_price < LPP!
+              (Promotional_price IS NULL AND Advertised_price < LPP)
           );
     """
     cursor.execute(insert_sql)
@@ -146,7 +138,7 @@ def populate_violation_table(conn):
                 SKU,
                 Sub_category,
                 MAP_Price,
-                COALESCE(Promotional_price, MAP_Price) AS Effective_Price,
+                COALESCE(Promotional_price, LPP) AS Effective_Price,
                 Advertised_price,
                 Price_Difference,
                 Violation_Percentage,
